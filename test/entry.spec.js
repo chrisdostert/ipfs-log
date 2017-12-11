@@ -2,33 +2,44 @@
 
 const assert = require('assert')
 const rmrf = require('rimraf')
+const IPFSRepo = require('ipfs-repo')
+const DatastoreLevel = require('datastore-level')
 const Entry = require('../src/entry')
 
 const apis = [require('ipfs')]
 
 const dataDir = './ipfs/tests/entry'
 
+const repoConf = {
+  storageBackends: {
+    blocks: DatastoreLevel,
+  },
+}
+
 let ipfs, ipfsDaemon
 
 apis.forEach((IPFS) => {
 
   describe('Entry', function() {
-    this.timeout(60000)
+    this.timeout(20000)
 
     before((done) => {
       rmrf.sync(dataDir)
       ipfs = new IPFS({ 
-        repo: dataDir,
+        repo: new IPFSRepo(dataDir, repoConf),
         EXPERIMENTAL: {
-          pubsub: true
+          pubsub: true,
+          dht: false,
+          sharding: false,
         },
       })
       ipfs.on('error', done)
       ipfs.on('ready', () => done())
     })
 
-    after(() => {
-      if (ipfs) ipfs.stop()
+    after(async () => {
+      if (ipfs) 
+        await ipfs.stop()
     })
 
     describe('create', () => {

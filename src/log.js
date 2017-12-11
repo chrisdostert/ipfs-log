@@ -10,6 +10,14 @@ const isDefined = require('./utils/is-defined')
 const _uniques = require('./utils/uniques')
 
 const randomId = () => new Date().getTime().toString()
+const getHash = e => e.hash
+const flatMap = (res, acc) => res.concat(acc)
+const getNextPointers = entry => entry.next
+const maxClockTimeReducer = (res, acc) => Math.max(res, acc.clock.time)
+const uniqueEntriesReducer = (res, acc) => {
+  res[acc.hash] = acc
+  return res
+}
 
 /**
  * Log
@@ -56,23 +64,21 @@ class Log extends GSet {
 
     // Add entries to the internal cache
     entries = entries || []
-    this._entryIndex = entries.reduce((res, val) => {
-      res[val.hash] =  val
-      return res
-    }, {})
+    this._entryIndex = entries.reduce(uniqueEntriesReducer, {})
 
     // Set heads if not passed as an argument
     heads = heads || Log.findHeads(entries)
-    this._headsIndex = heads.reduce((res, val) => {
-      res[val.hash] =  val
-      return res
-    }, {})
+    this._headsIndex = heads.reduce(uniqueEntriesReducer, {})
+
+    // Index of all next pointers in this log
+    this._nextsIndex = {}
+    entries.forEach(e => e.next.forEach(a => this._nextsIndex[a] = e.hash))
 
     // Set the length, we calculate the length manually internally
     this._length = entries ? entries.length : 0
 
     // Set the clock
-    const maxTime = Math.max(clock ? clock.time : 0, this.heads.reduce((res, acc) => Math.max(res, acc.clock.time), 0))
+    const maxTime = Math.max(clock ? clock.time : 0, this.heads.reduce(maxClockTimeReducer, 0))
     this._clock = new Clock(this.id, maxTime)
   }
 
@@ -147,12 +153,47 @@ class Log extends GSet {
     return this._entryIndex[entry.hash || entry] !== undefined
   }
 
+  traverse (rootEntries, amount) {
+    // console.log("traverse>", rootEntry)
+    let stack = rootEntries.map(getNextPointers).reduce(flatMap, [])
+    let traversed = {}
+    let result = {}
+    let count = 0
+
+    const addToStack = hash => {
+      if (!result[hash] && !traversed[hash]) {
+        stack.push(hash)
+        traversed[hash] = true
+      }
+    }
+
+    const addRootHash = rootEntry => {
+      result[rootEntry.hash] = rootEntry.hash
+      traversed[rootEntry.hash] = true
+      count ++
+    }
+
+    rootEntries.forEach(addRootHash)
+
+    while (stack.length > 0 && count < amount) {
+      const hash = stack.shift()
+      const entry = this.get(hash)
+      if (entry) {
+        count ++
+        result[entry.hash] = entry.hash
+        traversed[entry.hash] = true
+        entry.next.forEach(addToStack)
+      }
+    }
+    return result
+  }
+
   /**
    * Append an entry to the log
    * @param  {Entry} entry Entry to add
    * @return {Log}   New Log containing the appended value
    */
-  async append (data) {
+  async append (data, pointerCount = 1) {
     // Verify that we're allowed to append
     if (this._key 
         && !this._keys.includes(this._key.getPublic('hex')) 
@@ -161,11 +202,14 @@ class Log extends GSet {
     }
 
     // Update the clock (find the latest clock)
-    const newTime = Math.max(this.clock.time, this.heads.reduce((res, acc) => Math.max(res, acc.clock.time), 0)) + 1
+    const newTime = Math.max(this.clock.time, this.heads.reduce(maxClockTimeReducer, 0)) + 1
     this._clock = new Clock(this.clock.id, newTime)
+    // Get the required amount of hashes to next entries (as per current state of the log)
+    const nexts = Object.keys(this.traverse(this.heads, pointerCount))
     // Create the entry and add it to the internal cache
-    const entry = await Entry.create(this._storage, this.id, data, Object.values(this._headsIndex), this.clock, this._key)
+    const entry = await Entry.create(this._storage, this.id, data, nexts, this.clock, this._key)
     this._entryIndex[entry.hash] = entry
+    nexts.forEach(e => this._nextsIndex[e] = entry.hash)
     this._headsIndex = {}
     this._headsIndex[entry.hash] = entry
     // Update the length
@@ -195,10 +239,15 @@ class Log extends GSet {
     // Verify the entries
     // TODO: move to Entry
     const verifyEntries = async (entries) => {
-      const checkAllKeys = (keys, entry) => keys.find(e => e === entry.key)
-      const pubkeys = this._keys.map(e => e.getPublic ? e.getPublic('hex') : e)
+      const isTrue = e => e === true
+      const getPubKey = e => e.getPublic ? e.getPublic('hex') : e
+      const checkAllKeys = (keys, entry) => {
+        const keyMatches = e => e === entry.key
+        return keys.find(keyMatches)
+      }
+      const pubkeys = this._keys.map(getPubKey)
 
-      const checked = await pMap(entries, async (entry) => {
+      const verify = async (entry) => {
         if (!entry.key) throw new Error("Entry doesn't have a public key")
         if (!entry.sig) throw new Error("Entry doesn't have a signature")
 
@@ -223,32 +272,31 @@ class Log extends GSet {
         }
 
         return true
-      })
+      }
 
-      return checked.every(e => e === true)
-    }
-
-    const arrayOfEntriesToObject = (res, val) => {
-      res[val.hash] = val
-      return res
+      const checked = await pMap(entries, verify)
+      return checked.every(isTrue)
     }
 
     const difference = (log, exclude) => {
       let stack = Object.keys(log._headsIndex)
       let traversed = {}
       let res = {}
+
+      const pushToStack = hash => {
+        if (!traversed[hash] && !exclude.get(hash)) {
+          stack.push(hash)
+          traversed[hash] = true
+        }
+      }
+
       while (stack.length > 0) {
         const hash = stack.shift()
         const entry = log.get(hash)
           if (entry && !exclude.get(hash)) {
           res[entry.hash] = entry
           traversed[entry.hash] = true
-          entry.next.forEach(hash => {
-            if (!traversed[hash] && !exclude.get(hash)) {
-              stack.push(hash)
-              traversed[hash] = true
-            }
-          })
+          entry.next.forEach(pushToStack)
         }
       }
       return res
@@ -268,8 +316,12 @@ class Log extends GSet {
         return this
     }
 
-    // Update the internal index
+    // Update the internal entry index
     this._entryIndex = Object.assign(this._entryIndex, newItems)
+
+    // Update the internal next pointers index
+    const addToNextsIndex = e => e.next.forEach(a => this._nextsIndex[a] = e.hash)
+    Object.values(newItems).forEach(addToNextsIndex)
 
     // Update the length
     this._length += Object.values(newItems).length
@@ -278,16 +330,23 @@ class Log extends GSet {
     if (size > -1) {
       let tmp = this.values
       tmp = tmp.slice(-size)
-      this._entryIndex = tmp.reduce(arrayOfEntriesToObject, {})
+      this._entryIndex = tmp.reduce(uniqueEntriesReducer, {})
       this._length = Object.values(this._entryIndex).length
     }
 
     // Merge the heads
+    const notReferencedByNewItems = e => !nextsFromNewItems.find(a => a === e.hash)
+    const notInCurrentNexts = e => !this._nextsIndex[e.hash]
+    const nextsFromNewItems = Object.values(newItems).map(getNextPointers).reduce(flatMap, [])
     const mergedHeads = Log.findHeads(Object.values(Object.assign({}, this._headsIndex, log._headsIndex)))
-    this._headsIndex = mergedHeads.reduce(arrayOfEntriesToObject, {})
+      .filter(notReferencedByNewItems)
+      .filter(notInCurrentNexts)
+      .reduce(uniqueEntriesReducer, {})
+
+    this._headsIndex = mergedHeads
 
     // Find the latest clock from the heads
-    const maxClock = Object.values(this._headsIndex).reduce((res, val) => res = Math.max(res, val.clock.time), 0)
+    const maxClock = Object.values(this._headsIndex).reduce(maxClockTimeReducer, 0)
     const clock = new Clock(this.id, Math.max(this.clock.time, maxClock))
 
     this._id = id
@@ -302,7 +361,7 @@ class Log extends GSet {
   toJSON () {
     return {
       id: this.id,
-      heads: this.heads.map(e => e.hash)
+      heads: this.heads.map(getHash)
     }
   }
 

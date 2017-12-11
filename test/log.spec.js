@@ -2,6 +2,9 @@
 
 const assert = require('assert')
 const rmrf = require('rimraf')
+const IPFSRepo = require('ipfs-repo')
+const DatastoreLevel = require('datastore-level')
+// const MemStore = require('./utils/mem-store')
 const LogCreator = require('./utils/log-creator')
 const bigLogString = require('./fixtures/big-log.fixture.js')
 const Log = require('../src/log.js')
@@ -10,6 +13,12 @@ const Entry = require('../src/entry')
 const apis = [require('ipfs')]
 
 const dataDir = './ipfs/tests/log'
+
+const repoConf = {
+  storageBackends: {
+    blocks: DatastoreLevel,
+  },
+}
 
 let ipfs
 
@@ -20,23 +29,31 @@ const last = (arr) => {
 apis.forEach((IPFS) => {
 
   describe('Log', function() {
-    this.timeout(40000)
+    this.timeout(20000)
 
     before((done) => {
       rmrf.sync(dataDir)
       ipfs = new IPFS({ 
-        repo: dataDir,
+        repo: new IPFSRepo(dataDir, repoConf),
         EXPERIMENTAL: {
-          pubsub: true
+          pubsub: true,
+          dht: false,
+          sharding: false,
         },
       })
+
+      // Use memory store for quicker tests
+      // const memstore = new MemStore()
+      // ipfs.object.put = memstore.put.bind(memstore)
+      // ipfs.object.get = memstore.get.bind(memstore)
+
       ipfs.on('error', done)
       ipfs.on('ready', () => done())
     })
 
-    after(() => {
+    after(async () => {
       if (ipfs) 
-        ipfs.stop()
+        await ipfs.stop()
     })
 
     describe('constructor', async () => {
@@ -475,37 +492,83 @@ apis.forEach((IPFS) => {
     })
 
     describe('append', () => {
-      it('adds an item to an empty log', async () => {
-        let log = new Log(ipfs, 'A')
-        await log.append("hello1")
-        assert.equal(log.length, 1)
-        assert.equal(log.values[0].payload, 'hello1')
-        assert.equal(log.values[0].clock.time, 1)
+      describe('append one', async () => {
+        let log
+
+        before(async () => {
+          log = new Log(ipfs, 'A')
+          await log.append("hello1")
+        })
+
+        it('added the correct amount of items', () => {
+          assert.equal(log.length, 1)
+        })
+
+        it('added the correct values', async () => {
+          log.values.forEach((entry) => {
+            assert.equal(entry.payload, 'hello1')
+          })
+        })
+
+        it('added the correct amount of next pointers', async () => {
+          log.values.forEach((entry) => {
+            assert.equal(entry.next.length, 0)
+          })
+        })
+
+        it('has the correct heads', async () => {
+          log.heads.forEach((head) => {
+            assert.equal(head.hash, log.values[0].hash)
+          })
+        })
+
+        it('updated the clocks correctly', async () => {
+          log.values.forEach((entry) => {
+            assert.equal(entry.clock.id, 'A')
+            assert.equal(entry.clock.time, 1)
+          })
+        })
       })
 
-      it('has the right heads after append', async () => {
-        let log = new Log(ipfs, 'A')
-        await log.append('hello1')
-        assert.equal(log.heads.length, 1)
-        assert.equal(log.heads[0].hash, log.values[0].hash)
-      })
-
-      it('adds 100 items to a log', async () => {
+      describe('append 100 items to a log', async () => {
         const amount = 100
-        let log = new Log(ipfs, 'A')
+        const nextPointerAmount = 64
 
-        for(let i = 0; i < amount; i ++) {
-          await log.append("hello" + i)
-        }
+        let log
 
-        assert.equal(log.length, amount)
+        before(async () => {
+          log = new Log(ipfs, 'A')
+          for(let i = 0; i < amount; i ++) {
+            await log.append("hello" + i, nextPointerAmount)
+            // Make sure the log has the right heads after each append
+            const values = log.values
+            assert.equal(log.heads.length, 1)
+            assert.equal(log.heads[0].hash, values[values.length - 1].hash)
+          }
+        })
 
-        for(let k = 0; k < amount; k ++) {
-          const entry = log.values[k]
-          assert.equal(entry.payload, 'hello' + k)
-          assert.equal(entry.clock.time, k + 1)
-          assert.equal(entry.next.length, k > 0 ? 1 : 0)
-        }
+        it('added the correct amount of items', () => {
+          assert.equal(log.length, amount)
+        })
+
+        it('added the correct values', async () => {
+          log.values.forEach((entry, index) => {
+            assert.equal(entry.payload, 'hello' + index)
+          })
+        })
+
+        it('updated the clocks correctly', async () => {
+          log.values.forEach((entry, index) => {
+            assert.equal(entry.clock.time, index + 1)
+            assert.equal(entry.clock.id, 'A')
+          })
+        })
+
+        it('added the correct amount of next pointers', async () => {
+          log.values.forEach((entry, index) => {
+            assert.equal(entry.next.length, Math.min(index, nextPointerAmount))
+          })
+        })
       })
     })
 
@@ -1561,29 +1624,31 @@ apis.forEach((IPFS) => {
         assert.deepEqual(log.values.map(e => e.payload), expectedData)
       })
 
-      it('retrieves partially joined log deterministically', async () => {
+      it('retrieves partially joined log deterministically - single next pointer', async () => {
+        const nextPointerAmount = 1
+
         let logA = new Log(ipfs, 'A')
         let logB = new Log(ipfs, 'B')
         let log3 = new Log(ipfs, '3')
         let log  = new Log(ipfs, 'log')
 
         for(let i = 1; i <= 5; i ++) {
-          await logA.append('entryA' + i)
+          await logA.append('entryA' + i, nextPointerAmount)
         }
 
         for(let i = 1; i <= 5; i ++) {
-          await logB.append('entryB' + i)
+          await logB.append('entryB' + i, nextPointerAmount)
         }
 
         log3.join(logA)
         log3.join(logB)
 
         for(let i = 6; i <= 10; i ++) {
-          await logA.append('entryA' + i)
+          await logA.append('entryA' + i, nextPointerAmount)
         }
 
         log.join(log3, -1, 'X')
-        await log.append('entryC0')
+        await log.append('entryC0', nextPointerAmount)
 
         log.join(logA, -1)
 
@@ -1596,6 +1661,8 @@ apis.forEach((IPFS) => {
           'entryA5', 'entryB5', 'entryC0', 'entryA9', 'entryA10',
         ]
 
+        // console.log(log.values.map(e => e.payload))
+        // console.log(res.values.map(e => e.payload))
         assert.deepEqual(res.values.map(e => e.payload), first5)
 
         // First 11
@@ -1606,6 +1673,70 @@ apis.forEach((IPFS) => {
           'entryA5', 'entryB5', 
           'entryC0',
           'entryA7', 'entryA8', 'entryA9', 'entryA10',
+        ]
+
+        assert.deepEqual(res.values.map(e => e.payload), first11)
+
+        // All but one
+        res = await Log.fromMultihash(ipfs, mh, 16 - 1)
+
+        const all = [ 
+          'entryA1', /* excl */ 'entryA2', 'entryB2', 'entryA3', 'entryB3',
+          'entryA4', 'entryB4', 'entryA5', 'entryB5',
+          'entryA6', 
+          'entryC0', 'entryA7', 'entryA8', 'entryA9', 'entryA10',
+        ]
+
+        assert.deepEqual(res.values.map(e => e.payload), all)
+      })
+
+      it('retrieves partially joined log deterministically - multiple next pointers', async () => {
+        const nextPointersAmount = 64
+
+        let logA = new Log(ipfs, 'A')
+        let logB = new Log(ipfs, 'B')
+        let log3 = new Log(ipfs, '3')
+        let log  = new Log(ipfs, 'log')
+
+        for(let i = 1; i <= 5; i ++) {
+          await logA.append('entryA' + i, nextPointersAmount)
+        }
+
+        for(let i = 1; i <= 5; i ++) {
+          await logB.append('entryB' + i, nextPointersAmount)
+        }
+
+        log3.join(logA)
+        log3.join(logB)
+
+        for(let i = 6; i <= 10; i ++) {
+          await logA.append('entryA' + i, nextPointersAmount)
+        }
+
+        log.join(log3, -1, 'X')
+        await log.append('entryC0', nextPointersAmount)
+
+        log.join(logA, -1)
+
+        const mh = await log.toMultihash()
+
+        // First 5
+        let res = await Log.fromMultihash(ipfs, mh, 5)
+
+        const first5 = [ 
+          'entryC0', 'entryA7', 'entryA8', 'entryA9', 'entryA10',
+        ]
+
+        assert.deepEqual(res.values.map(e => e.payload), first5)
+
+        // First 11
+        res = await Log.fromMultihash(ipfs, mh, 11)
+
+        const first11 = [ 
+             'entryA1', 'entryA2', 'entryA3', 'entryA4',
+             'entryA5', 'entryA6',
+             'entryC0',
+             'entryA7', 'entryA8', 'entryA9', 'entryA10',
         ]
 
         assert.deepEqual(res.values.map(e => e.payload), first11)

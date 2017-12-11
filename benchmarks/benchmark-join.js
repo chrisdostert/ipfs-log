@@ -4,6 +4,7 @@ const Log = require('../src/log')
 const IPFS = require('ipfs')
 const IPFSRepo = require('ipfs-repo')
 const DatastoreLevel = require('datastore-level')
+const MemStore = require('../test/utils/mem-store')
 
 // State
 let ipfs
@@ -56,6 +57,11 @@ let run = (() => {
   })
 
   ipfs.on('ready', () => {
+    // Use memory store to test without disk IO
+    // const memstore = new MemStore()
+    // ipfs.object.put = memstore.put.bind(memstore)
+    // ipfs.object.get = memstore.get.bind(memstore)
+
     log1 = new Log(ipfs, 'A')
     log2 = new Log(ipfs, 'B')
 

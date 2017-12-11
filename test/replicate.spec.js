@@ -2,10 +2,18 @@
 
 const assert = require('assert')
 const rmrf = require('rimraf')
+const IPFSRepo = require('ipfs-repo')
+const DatastoreLevel = require('datastore-level')
 const config = require('./config/ipfs-daemon.config')
 const Log = require('../src/log.js')
 
 const apis = [require('ipfs')]
+
+const repoConf = {
+  storageBackends: {
+    blocks: DatastoreLevel,
+  },
+}
 
 const channel = 'XXX'
 
@@ -30,36 +38,44 @@ const waitForPeers = (ipfs, channel) => {
 apis.forEach((IPFS) => {
 
   describe('ipfs-log - Replication', function() {
-    this.timeout(80000)
+    this.timeout(40000)
 
     let ipfs1, ipfs2, client1, client2, db1, db2, id1, id2
 
     before(function (done) {
       rmrf.sync(config.daemon1.repo)
       rmrf.sync(config.daemon2.repo)
+
+      config.damon1 = Object.assign({}, config.daemon1, { repo: new IPFSRepo(config.daemon1.repo, repoConf) })
       ipfs1 = new IPFS(config.daemon1)
       ipfs1.on('error', done)
       ipfs1.on('ready', () => {
         ipfs1.id()
           .then((id) => id1 = id.id)
           .then(() => {
+            config.damon2 = Object.assign({}, config.daemon2, { repo: new IPFSRepo(config.daemon2.repo, repoConf) })
             ipfs2 = new IPFS(config.daemon2)
             ipfs2.on('error', done)
             ipfs2.on('ready', () => {
               ipfs2.id()
                 .then((id) => id2 = id.id)
-                .then(() => done())
+                .then(async () => {
+                  // Connect the peers manually to speed up test times
+                  await ipfs2.swarm.connect(ipfs1._peerInfo.multiaddrs._multiaddrs[0].toString())
+                  await ipfs1.swarm.connect(ipfs2._peerInfo.multiaddrs._multiaddrs[0].toString())
+                  done()
+                })
             })
           })
       })
     })
 
-    after(() => {
+    after(async () => {
       if (ipfs1) 
-        ipfs1.stop()
-      
+        await ipfs1.stop()
+
       if (ipfs2) 
-        ipfs2.stop()
+        await ipfs2.stop()
     })
 
     describe('replicates logs deterministically', function() {

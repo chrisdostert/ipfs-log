@@ -2,6 +2,8 @@
 
 const assert = require('assert')
 const rmrf = require('rimraf')
+const IPFSRepo = require('ipfs-repo')
+const DatastoreLevel = require('datastore-level')
 const Log = require('../src/log')
 const EntryIO = require('../src/entry-io')
 
@@ -9,32 +11,38 @@ const apis = [require('ipfs')]
 
 const dataDir = './ipfs/tests/fetch'
 
-let ipfs, ipfsDaemon
-
-const last = (arr) => {
-  return arr[arr.length - 1]
+const repoConf = {
+  storageBackends: {
+    blocks: DatastoreLevel,
+  },
 }
 
-apis.forEach((IPFS) => {
+let ipfs, ipfsDaemon
 
+const last = arr => arr[arr.length - 1]
+
+apis.forEach((IPFS) => {
   describe('Entry - Persistency', function() {
-    this.timeout(60000)
+    this.timeout(20000)
 
     before((done) => {
       rmrf.sync(dataDir)
       ipfs = new IPFS({ 
-        repo: dataDir,
+        repo: new IPFSRepo(dataDir, repoConf),
+        start: true,
         EXPERIMENTAL: {
-          pubsub: true
+          pubsub: true,
+          dht: false,
+          sharding: false,
         },
       })
       ipfs.on('error', done)
       ipfs.on('ready', () => done())
     })
 
-    after(() => {
+    after(async () => {
       if (ipfs) 
-        ipfs.stop()
+        await ipfs.stop()
     })
 
     it('log with one entry', async () => {

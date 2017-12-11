@@ -2,18 +2,27 @@
 
 const assert = require('assert')
 const rmrf = require('rimraf')
-const Log = require('../src/log.js')
+const IPFSRepo = require('ipfs-repo')
+const DatastoreLevel = require('datastore-level')
 const Keystore = require('orbit-db-keystore')
+const Log = require('../src/log.js')
 
 const apis = [require('ipfs')]
 
 const dataDir = './ipfs/tests/log'
 
+const repoConf = {
+  storageBackends: {
+    blocks: DatastoreLevel,
+  },
+}
+
 const ipfsConf = { 
-  repo: dataDir,
-  start: true,
+  repo: new IPFSRepo(dataDir, repoConf),
   EXPERIMENTAL: {
-    pubsub: true
+    pubsub: true,
+    dht: false,
+    sharding: false,
   },
 }
 
@@ -40,9 +49,9 @@ apis.forEach((IPFS) => {
       ipfs.on('ready', () => done())
     })
 
-    after(() => {
+    after(async () => {
       if (ipfs) 
-        ipfs.stop()
+        await ipfs.stop()
     })
 
     it('creates a signed log', () => {

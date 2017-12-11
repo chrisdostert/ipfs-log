@@ -5,6 +5,7 @@ const Keystore = require('orbit-db-keystore')
 const IPFS = require('ipfs')
 const IPFSRepo = require('ipfs-repo')
 const DatastoreLevel = require('datastore-level')
+const MemStore = require('../test/utils/mem-store')
 
 // State
 let ipfs
@@ -57,9 +58,15 @@ let run = (() => {
   })
 
   ipfs.on('ready', () => {
+    // Use memory store to test without disk IO
+    // const memstore = new MemStore()
+    // ipfs.object.put = memstore.put.bind(memstore)
+    // ipfs.object.get = memstore.get.bind(memstore)
+
     const keystore = new Keystore('./test-keys')
     const key = keystore.createKey('benchmark-append-signed')
     ipfs.keystore = keystore
+
     log1 = new Log(ipfs, 'A', null, null, null, key, key.getPublic('hex'))
     log2 = new Log(ipfs, 'B', null, null, null, key, key.getPublic('hex'))
 

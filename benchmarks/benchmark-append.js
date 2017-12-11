@@ -4,6 +4,7 @@ const Log = require('../src/log')
 const IPFS = require('ipfs')
 const IPFSRepo = require('ipfs-repo')
 const DatastoreLevel = require('datastore-level')
+const MemStore = require('../test/utils/mem-store')
 
 // State
 let ipfs
@@ -15,15 +16,12 @@ let seconds = 0
 let queriesPerSecond = 0
 let lastTenSeconds = 0
 
-const queryLoop = () => {
-  log.append(totalQueries.toString())
-    .then((res) => {
-      totalQueries++
-      lastTenSeconds++
-      queriesPerSecond++
-      setImmediate(queryLoop)
-    })
-    .catch((e) => console.error(e))
+const queryLoop = async () => {
+  await log.append(totalQueries.toString())
+  totalQueries++
+  lastTenSeconds++
+  queriesPerSecond++
+  setImmediate(queryLoop)
 }
 
 let run = (() => {
@@ -50,6 +48,12 @@ let run = (() => {
   })
 
   ipfs.on('ready', () => {
+    // Use memory store to test without disk IO
+    // const memstore = new MemStore()
+    // ipfs.object.put = memstore.put.bind(memstore)
+    // ipfs.object.get = memstore.get.bind(memstore)
+
+    // Create a log
     log = new Log(ipfs, 'A')
 
     // Output metrics at 1 second interval
